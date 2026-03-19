@@ -302,12 +302,18 @@ def build_armature(archive, collection):
     arm_obj  = bpy.data.objects.new("Armature", arm_data)
     collection.objects.link(arm_obj)
 
+    # Enter edit mode safely using temp_override (works in any context)
     bpy.context.view_layer.objects.active = arm_obj
-    bpy.ops.object.mode_set(mode='EDIT')
-    eb_map = {}
+    arm_obj.select_set(True)
 
+    with bpy.context.temp_override(active_object=arm_obj, object=arm_obj,
+                                   selected_objects=[arm_obj],
+                                   selected_editable_objects=[arm_obj]):
+        bpy.ops.object.mode_set(mode='EDIT')
+
+    eb_map = {}
     for bone in archive.bone_anim_chunks[0].bones:
-        bid  = bone.bone_id
+        bid   = bone.bone_id
         bname = names[bid] if bid < len(names) else (bone.name or f"Bone_{bid}")
         eb = arm_data.edit_bones.new(bname)
         eb.head = (0, 0, 0)
@@ -318,7 +324,6 @@ def build_armature(archive, collection):
             try:
                 mx = cry_matrix43_to_blender(init)
                 head = mx.translation
-                # Bones in Max point along local X axis
                 local_x = mx.col[0].xyz.normalized() * (0.05 * INCHES_TO_METERS)
                 eb.head = head
                 eb.tail = head + local_x
@@ -326,16 +331,19 @@ def build_armature(archive, collection):
                 print(f"[CGF] Bone matrix error {bname}: {e}")
         eb_map[bid] = eb
 
-    # Parent bones
     for bone in archive.bone_anim_chunks[0].bones:
         if bone.parent_id >= 0 and bone.parent_id in eb_map:
-            child = eb_map[bone.bone_id]
+            child  = eb_map[bone.bone_id]
             parent = eb_map[bone.parent_id]
             child.parent = parent
             if (child.head - parent.tail).length < 0.0001:
                 child.use_connect = True
 
-    bpy.ops.object.mode_set(mode='OBJECT')
+    with bpy.context.temp_override(active_object=arm_obj, object=arm_obj,
+                                   selected_objects=[arm_obj],
+                                   selected_editable_objects=[arm_obj]):
+        bpy.ops.object.mode_set(mode='OBJECT')
+
     return arm_obj, arm_data
 
 
@@ -621,26 +629,110 @@ def load(operator, context, filepath,
     return {'FINISHED'}
 
 
-def load_caf(operator, context, filepath, append=True):
+def _find_cgf_near(filepath):
     """
-    Import a CAF animation file onto the active armature.
-    Must have a CGF already imported in the scene.
+    Find a CGF or CGA file in the same folder as the given CAF/CAL file.
+    Returns the path to the first one found, or None.
     """
+    folder = os.path.dirname(filepath)
+    # Same base name first (e.g. soldier.cal → soldier.cgf)
+    base = os.path.splitext(os.path.basename(filepath))[0]
+    for ext in ('.cgf', '.cga'):
+        p = os.path.join(folder, base + ext)
+        if os.path.isfile(p):
+            return p
+    # Any CGF/CGA in the same folder
+    try:
+        for fname in os.listdir(folder):
+            if fname.lower().endswith(('.cgf', '.cga')):
+                return os.path.join(folder, fname)
+    except Exception:
+        pass
+    return None
+
+
+def _ensure_armature(operator, context, anim_filepath):
+    # Check active object first
     arm_obj = context.active_object
-    if arm_obj is None or arm_obj.type != 'ARMATURE':
-        # Try to find any armature
-        for obj in context.scene.objects:
-            if obj.type == 'ARMATURE':
-                arm_obj = obj; break
+    print(f"[CGF] active_object: {arm_obj} type: {arm_obj.type if arm_obj else None}")
+    if arm_obj and arm_obj.type == 'ARMATURE':
+        return arm_obj, None
+
+    # Search the whole scene
+    print(f"[CGF] Scene objects: {[o.name+':'+o.type for o in context.scene.objects]}")
+    for obj in context.scene.objects:
+        if obj.type == 'ARMATURE':
+            return obj, None
+
+    # No armature — try to auto-import CGF from same folder
+    cgf_path = _find_cgf_near(anim_filepath)
+    print(f"[CGF] CGF found near anim: {cgf_path}")
+    if not cgf_path:
+        operator.report({'ERROR'},
+            "No armature found and no CGF/CGA file found in the same folder.")
+        return None, None
+
+    print(f"[CGF] Auto-importing geometry: {cgf_path}")
+    reader = cgf_reader.ChunkReader()
+    try:
+        archive = reader.read_file(cgf_path)
+    except ValueError as e:
+        operator.report({'ERROR'}, f"Failed to read CGF: {e}")
+        return None, None
+
+    print(f"[CGF] Archive: bone_anim_chunks={len(archive.bone_anim_chunks)} mesh={len(archive.mesh_chunks)}")
+
+    file_name  = os.path.splitext(os.path.basename(cgf_path))[0]
+    collection = bpy.data.collections.new(file_name)
+    context.scene.collection.children.link(collection)
+
+    arm_obj = None
+    if archive.bone_anim_chunks:
+        try:
+            arm_obj, _ = build_armature(archive, collection)
+            print(f"[CGF] build_armature result: {arm_obj}")
+        except Exception as e:
+            print(f"[CGF] build_armature FAILED: {e}")
+            import traceback; traceback.print_exc()
+
+        if arm_obj:
+            arm_obj['cgf_source_path'] = cgf_path
+            if archive.bone_name_list_chunks:
+                name_list = archive.bone_name_list_chunks[0].name_list
+                for bone in archive.bone_anim_chunks[0].bones:
+                    bid   = bone.bone_id
+                    bname = name_list[bid] if bid < len(name_list) else f"Bone_{bid}"
+                    if arm_obj.pose and bname in arm_obj.pose.bones:
+                        arm_obj.pose.bones[bname]['cry_ctrl_id'] = bone.ctrl_id
+
+    for mc in archive.mesh_chunks:
+        node = archive.get_node(mc.header.chunk_id)
+        build_mesh(mc, node, archive, collection,
+                   import_materials=False, import_normals=False,
+                   import_uvs=False, import_weights=True,
+                   blender_materials={}, filepath=cgf_path)
 
     if arm_obj is None:
-        operator.report({'ERROR'}, "No armature found. Import a CGF file first.")
+        operator.report({'ERROR'},
+            "CGF imported but no armature was created (file has no skeleton).")
+        return None, None
+
+    context.view_layer.objects.active = arm_obj
+    return arm_obj, archive
+
+
+def load_caf(operator, context, filepath, append=True):
+    """Import a CAF animation file. Auto-imports CGF if no armature in scene."""
+
+    arm_obj, auto_archive = _ensure_armature(operator, context, filepath)
+    if arm_obj is None:
         return {'CANCELLED'}
 
-    # Find the CGF archive stored as a custom property, or rebuild from scene
-    # We need the geom archive for ctrl_id → bone_name mapping
-    # Build a minimal geom archive from the armature's pose bones + custom props
-    geom_archive = _build_geom_archive_from_armature(arm_obj)
+    # Use the auto-imported archive directly if available (avoids re-reading CGF)
+    if auto_archive is not None:
+        geom_archive = auto_archive
+    else:
+        geom_archive = _build_geom_archive_from_armature(arm_obj)
 
     print(f"[CGF] Loading animation: {filepath}")
     reader = cgf_reader.ChunkReader()
@@ -649,7 +741,7 @@ def load_caf(operator, context, filepath, append=True):
     except ValueError as e:
         operator.report({'ERROR'}, str(e)); return {'CANCELLED'}
 
-    print(f"[CGF] Anim chunks: controllers={len(anim_archive.controller_chunks)}")
+    print(f"[CGF] Controllers: {len(anim_archive.controller_chunks)}")
 
     action_name = os.path.splitext(os.path.basename(filepath))[0]
     apply_animation(arm_obj, geom_archive, anim_archive, action_name)
@@ -659,19 +751,18 @@ def load_caf(operator, context, filepath, append=True):
 
 
 def load_cal(operator, context, filepath):
-    """Import all animations listed in a CAL file."""
-    arm_obj = context.active_object
-    if arm_obj is None or arm_obj.type != 'ARMATURE':
-        for obj in context.scene.objects:
-            if obj.type == 'ARMATURE':
-                arm_obj = obj; break
+    """Import all animations from a CAL file. Auto-imports CGF if needed."""
+
+    arm_obj, auto_archive = _ensure_armature(operator, context, filepath)
     if arm_obj is None:
-        operator.report({'ERROR'}, "No armature found. Import a CGF file first.")
         return {'CANCELLED'}
 
-    geom_archive = _build_geom_archive_from_armature(arm_obj)
-    records = cgf_reader.read_cal_file(filepath)
+    if auto_archive is not None:
+        geom_archive = auto_archive
+    else:
+        geom_archive = _build_geom_archive_from_armature(arm_obj)
 
+    records = cgf_reader.read_cal_file(filepath)
     if not records:
         operator.report({'WARNING'}, "CAL file is empty or could not be parsed")
         return {'CANCELLED'}
@@ -681,13 +772,12 @@ def load_cal(operator, context, filepath):
         caf_path = find_caf_file(rec.path, filepath,
                                   arm_obj.get('cgf_source_path', ''))
         if not caf_path:
-            print(f"[CGF] CAF not found: {rec.path}")
-            continue
+            print(f"[CGF] CAF not found: {rec.path}"); continue
         reader = cgf_reader.ChunkReader()
         try:
             anim_archive = reader.read_file(caf_path)
         except Exception as e:
-            print(f"[CGF] Failed to read {caf_path}: {e}"); continue
+            print(f"[CGF] Failed {caf_path}: {e}"); continue
 
         apply_animation(arm_obj, geom_archive, anim_archive, rec.name)
         imported += 1
@@ -701,20 +791,34 @@ def _build_geom_archive_from_armature(arm_obj):
     Reconstruct a minimal CryChunkArchive from an imported armature
     so we can match controller IDs to bone names during CAF import.
     Bone ctrl_ids are stored as custom properties on pose bones.
+    Falls back to re-reading the source CGF if pose data is unavailable.
     """
     archive = cgf_reader.CryChunkArchive()
     archive.geom_file_name = arm_obj.get('cgf_source_path', '')
 
-    # Build a fake BoneAnimChunk from the armature's pose bones
-    bac = cgf_reader.CryBoneAnimChunk()
-    bac.header = cgf_reader.ChunkHeader()
+    # Try to reload from source CGF first — most reliable
+    source_path = arm_obj.get('cgf_source_path', '')
+    if source_path and os.path.isfile(source_path):
+        try:
+            reader = cgf_reader.ChunkReader()
+            src = reader.read_file(source_path)
+            archive.bone_anim_chunks      = src.bone_anim_chunks
+            archive.bone_name_list_chunks = src.bone_name_list_chunks
+            return archive
+        except Exception as e:
+            print(f"[CGF] Could not reload source CGF: {e}")
+
+    # Fallback: build from pose bones + stored ctrl_ids
+    bac  = cgf_reader.CryBoneAnimChunk()
+    bac.header  = cgf_reader.ChunkHeader()
     bnlc = cgf_reader.CryBoneNameListChunk()
     bnlc.header = cgf_reader.ChunkHeader()
 
-    for i, pbone in enumerate(arm_obj.pose.bones):
+    pose_bones = arm_obj.pose.bones if arm_obj.pose else []
+    for i, pbone in enumerate(pose_bones):
         bone = cgf_reader.CryBone()
         bone.bone_id = i
-        bone.name = pbone.name
+        bone.name    = pbone.name
         bone.ctrl_id = pbone.get('cry_ctrl_id', 'FFFFFFFF')
         bac.bones.append(bone)
         bnlc.name_list.append(pbone.name)
