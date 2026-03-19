@@ -88,7 +88,7 @@ def _set_input(node, *names, value):
             return
 
 
-def build_material(mat_chunk, filepath, import_materials):
+def build_material(mat_chunk, filepath, import_materials, game_root_path=""):
     if not import_materials:
         return None
     mat = bpy.data.materials.get(mat_chunk.name)
@@ -124,8 +124,9 @@ def build_material(mat_chunk, filepath, import_materials):
     def add_tex(tex_data, x, y, color_space='sRGB'):
         if not tex_data or not tex_data.name:
             return None
-        path = _find_texture(tex_data.name, filepath)
+        path = _find_texture(tex_data.name, filepath, game_root_path)
         if not path:
+            print(f"[CGF] Texture not found: {tex_data.name}")
             return None
         node = nodes.new('ShaderNodeTexImage')
         node.location = (x, y)
@@ -133,8 +134,8 @@ def build_material(mat_chunk, filepath, import_materials):
             img = bpy.data.images.load(path, check_existing=True)
             img.colorspace_settings.name = color_space
             node.image = img
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[CGF] Failed to load texture {path}: {e}")
         return node
 
     tex_diff = add_tex(mat_chunk.tex_diffuse, -400, 0)
@@ -150,21 +151,39 @@ def build_material(mat_chunk, filepath, import_materials):
     return mat
 
 
-def _find_texture(name, cgf_path):
+def _find_texture(name, cgf_path, game_root_path=""):
+    """
+    Search for a texture. Mirrors getFullFilename from original Max script:
+    1. game_root_path + name  (texture name is relative to game root)
+    2. CGF folder + name
+    3. CGF folder + basename only
+    """
     if not name:
         return None
-    base = os.path.dirname(cgf_path)
+
+    name = name.replace('\\', os.sep).replace('/', os.sep)
     basename = os.path.basename(name)
-    exts = ['', '.dds', '.tga', '.png', '.jpg', '.bmp']
-    for candidate in [name, os.path.join(base, basename), os.path.join(base, name)]:
-        no_ext = os.path.splitext(candidate)[0]
+    cgf_dir  = os.path.dirname(cgf_path)
+    exts     = ['', '.dds', '.tga', '.png', '.jpg', '.bmp']
+
+    def try_path(p):
+        if os.path.isfile(p): return p
+        base_no_ext = os.path.splitext(p)[0]
         for ext in exts:
-            p = candidate if os.path.splitext(candidate)[1] else candidate + ext
-            if os.path.isfile(p):
-                return p
-            p2 = no_ext + ext
-            if os.path.isfile(p2):
-                return p2
+            if os.path.isfile(base_no_ext + ext):
+                return base_no_ext + ext
+        return None
+
+    if game_root_path:
+        r = try_path(os.path.join(game_root_path, name))
+        if r: return r
+
+    r = try_path(os.path.join(cgf_dir, name))
+    if r: return r
+
+    r = try_path(os.path.join(cgf_dir, basename))
+    if r: return r
+
     return None
 
 
@@ -185,9 +204,34 @@ def build_mesh(mesh_chunk, node_chunk, archive, collection,
 
     bm = bmesh.new()
 
-    # Vertices (scaled inches → meters)
-    for cv in mc.vertices:
-        bm.verts.new(cry_vec(cv.pos))
+    # Vertices
+    # For skinned meshes, Max recalculates vertex positions using bone transforms:
+    #   p = sum(link.offset * bone.transform * link.blending) for each link
+    # link.offset is the vertex position in the bone's local space.
+    # We precompute this if bone initial positions are available.
+    bone_matrices = {}  # bone_id → Blender Matrix4x4
+    if mc.has_bone_info and mc.physique and archive.bone_initial_pos_chunks:
+        for bone in (archive.bone_anim_chunks[0].bones if archive.bone_anim_chunks else []):
+            init = archive.get_bone_initial_pos(bone.bone_id)
+            if init:
+                bone_matrices[bone.bone_id] = cry_matrix43_to_blender(init)
+
+    for vi, cv in enumerate(mc.vertices):
+        if mc.has_bone_info and vi < len(mc.physique) and bone_matrices:
+            # Recalculate position via bone transforms (like Max does)
+            bl = mc.physique[vi]
+            p = mathutils.Vector((0, 0, 0))
+            for lnk in bl.links:
+                if lnk.bone_id in bone_matrices:
+                    bm_mat = bone_matrices[lnk.bone_id]
+                    # offset is in bone local space, scaled to meters
+                    off = mathutils.Vector((lnk.offset[0] * INCHES_TO_METERS,
+                                           lnk.offset[1] * INCHES_TO_METERS,
+                                           lnk.offset[2] * INCHES_TO_METERS))
+                    p += bm_mat @ off * lnk.blending
+            bm.verts.new(p)
+        else:
+            bm.verts.new(cry_vec(cv.pos))
     bm.verts.ensure_lookup_table()
 
     # Faces
@@ -242,26 +286,30 @@ def build_mesh(mesh_chunk, node_chunk, archive, collection,
             pass
 
     # Materials
-    if import_materials and blender_materials and node_chunk:
-        mat_chunk = archive.get_material_chunk(node_chunk.material_id)
+    # face.mat_id in CGF = global index among ALL standard materials in file,
+    # excluding Multi materials. This matches how Max buildMatMappings() works.
+    # We build the same mapping: standard_mat_index → (blender_material, slot_index)
+    if import_materials and blender_materials:
+        mat_chunk = archive.get_material_chunk(node_chunk.material_id) if node_chunk else None
         if mat_chunk:
-            used_ids = sorted(set(cf.mat_id for cf in mc.faces))
-            slot_map = {}
-            if mat_chunk.children:
-                for si, cid in enumerate(mat_chunk.children):
-                    child = archive.get_material_chunk(cid)
-                    if child and child.name in blender_materials:
-                        bmat = blender_materials[child.name]
-                        if bmat.name not in [m.name for m in mesh.materials]:
-                            mesh.materials.append(bmat)
-                        slot_map[si] = list(mesh.materials).index(bmat)
-            else:
-                if mat_chunk.name in blender_materials:
-                    mesh.materials.append(blender_materials[mat_chunk.name])
-                    for mid in used_ids: slot_map[mid] = 0
+            # Collect all standard material chunks in order (same as Max tempStandardMatArray)
+            standard_chunks = []
+            _collect_standard_chunks(mat_chunk, archive, standard_chunks)
+
+            # Add all standard materials as slots and build matID → slot map
+            slot_map = {}  # face.mat_id → mesh material slot index
+            for i, std_chunk in enumerate(standard_chunks):
+                if std_chunk.name in blender_materials:
+                    bmat = blender_materials[std_chunk.name]
+                    if bmat.name not in [m.name for m in mesh.materials]:
+                        mesh.materials.append(bmat)
+                    slot_map[i] = list(mesh.materials).index(bmat)
+
+            # Assign material slots to polygons
             for pi, poly in enumerate(mesh.polygons):
                 if pi < len(mc.faces):
-                    poly.material_index = slot_map.get(mc.faces[pi].mat_id, 0)
+                    mid = mc.faces[pi].mat_id
+                    poly.material_index = slot_map.get(mid, 0)
 
     # Transform
     if node_chunk and node_chunk.trans_matrix:
@@ -288,6 +336,26 @@ def _assign_weights(obj, mc, archive):
             if bname not in obj.vertex_groups:
                 obj.vertex_groups.new(name=bname)
             obj.vertex_groups[bname].add([vid], lnk.blending, 'REPLACE')
+
+
+def _collect_standard_chunks(mat_chunk, archive, result):
+    """
+    Recursively collect all STANDARD material chunks in order, skipping Multi.
+    This mirrors Max's tempStandardMatArray — face.mat_id is an index into this list.
+
+    materialType_Standard = 1
+    materialType_Multi    = 2
+    """
+    if mat_chunk.type == 1:  # Standard
+        result.append(mat_chunk)
+    elif mat_chunk.type == 2:  # Multi — recurse into children
+        for cid in mat_chunk.children:
+            child = archive.get_material_chunk(cid)
+            if child:
+                _collect_standard_chunks(child, archive, result)
+    else:
+        # Unknown type — treat as standard
+        result.append(mat_chunk)
 
 
 # ── Armature ──────────────────────────────────────────────────────────────────
@@ -570,10 +638,11 @@ def find_caf_file(caf_name, cal_filepath, geom_filepath):
 
 def load(operator, context, filepath,
          import_materials=True, import_normals=True, import_uvs=True,
-         import_skeleton=True, import_weights=True):
+         import_skeleton=True, import_weights=True, game_root_path=""):
     """Import a CGF/CGA geometry file."""
 
     print(f"[CGF] Loading: {filepath}")
+    print(f"[CGF] Game root: '{game_root_path}'")
     reader = cgf_reader.ChunkReader()
     try:
         archive = reader.read_file(filepath)
@@ -588,17 +657,16 @@ def load(operator, context, filepath,
     collection = bpy.data.collections.new(file_name)
     context.scene.collection.children.link(collection)
 
-    # Materials
+    # Materials — collect ALL standard chunks recursively
     blender_materials = {}
     if import_materials:
         for mc in archive.material_chunks:
-            bmat = build_material(mc, filepath, import_materials)
-            if bmat: blender_materials[mc.name] = bmat
-            for cid in mc.children:
-                child = archive.get_material_chunk(cid)
-                if child:
-                    bmat = build_material(child, filepath, import_materials)
-                    if bmat: blender_materials[child.name] = bmat
+            standard_chunks = []
+            _collect_standard_chunks(mc, archive, standard_chunks)
+            for std in standard_chunks:
+                if std.name not in blender_materials:
+                    bmat = build_material(std, filepath, import_materials, game_root_path)
+                    if bmat: blender_materials[std.name] = bmat
 
     # Armature
     arm_obj = None
@@ -631,23 +699,16 @@ def load(operator, context, filepath,
 
 def _find_cgf_near(filepath):
     """
-    Find a CGF or CGA file in the same folder as the given CAF/CAL file.
-    Returns the path to the first one found, or None.
+    Find a CGF or CGA file with the SAME base name as the given CAF/CAL file.
+    Returns the path if found, or None.
+    Does NOT fall back to random CGF files in the folder.
     """
     folder = os.path.dirname(filepath)
-    # Same base name first (e.g. soldier.cal → soldier.cgf)
     base = os.path.splitext(os.path.basename(filepath))[0]
     for ext in ('.cgf', '.cga'):
         p = os.path.join(folder, base + ext)
         if os.path.isfile(p):
             return p
-    # Any CGF/CGA in the same folder
-    try:
-        for fname in os.listdir(folder):
-            if fname.lower().endswith(('.cgf', '.cga')):
-                return os.path.join(folder, fname)
-    except Exception:
-        pass
     return None
 
 
@@ -668,8 +729,10 @@ def _ensure_armature(operator, context, anim_filepath):
     cgf_path = _find_cgf_near(anim_filepath)
     print(f"[CGF] CGF found near anim: {cgf_path}")
     if not cgf_path:
+        base = os.path.splitext(os.path.basename(anim_filepath))[0]
         operator.report({'ERROR'},
-            "No armature found and no CGF/CGA file found in the same folder.")
+            f"No CGF/CGA found with name '{base}' in the same folder. "
+            f"Expected: {base}.cgf or {base}.cga")
         return None, None
 
     print(f"[CGF] Auto-importing geometry: {cgf_path}")
