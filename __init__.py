@@ -37,6 +37,10 @@ class ImportCGF(bpy.types.Operator, ImportHelper):
         description="Build armature from bone chunks", default=True)
     import_weights: BoolProperty(name="Import Vertex Weights",
         description="Assign bone weights for skinned meshes", default=True)
+    game_root_path: StringProperty(name="Game Root Path",
+        description="Root folder of Far Cry installation (where Objects/, Textures/ etc. are located). "
+                    "Used to find textures by their relative path stored in materials.",
+        default="", subtype='DIR_PATH')
 
     def execute(self, context):
         result = cgf_builder.load(
@@ -47,13 +51,12 @@ class ImportCGF(bpy.types.Operator, ImportHelper):
             import_uvs       = self.import_uvs,
             import_skeleton  = self.import_skeleton,
             import_weights   = self.import_weights,
+            game_root_path   = self.game_root_path,
         )
-        # Store source path on armature for later CAF import
         if result == {'FINISHED'}:
             for obj in context.scene.objects:
                 if obj.type == 'ARMATURE' and not obj.get('cgf_source_path'):
                     obj['cgf_source_path'] = self.filepath
-                    # Store ctrl_ids on pose bones
                     _store_ctrl_ids(obj)
         return result
 
@@ -68,6 +71,9 @@ class ImportCGF(bpy.types.Operator, ImportHelper):
         box.label(text="Skinning", icon='ARMATURE_DATA')
         box.prop(self, "import_skeleton")
         box.prop(self, "import_weights")
+        box = layout.box()
+        box.label(text="Textures", icon='TEXTURE')
+        box.prop(self, "game_root_path")
 
 
 def _store_ctrl_ids(arm_obj):
