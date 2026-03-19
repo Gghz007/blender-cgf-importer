@@ -123,11 +123,14 @@ def build_material(mat_chunk, filepath, import_materials, game_root_path=""):
 
     def add_tex(tex_data, x, y, color_space='sRGB'):
         if not tex_data or not tex_data.name:
+            print(f"[CGF] add_tex: tex_data={tex_data}")
             return None
+        print(f"[CGF] Searching: '{tex_data.name}' | root='{game_root_path}'")
         path = _find_texture(tex_data.name, filepath, game_root_path)
         if not path:
-            print(f"[CGF] Texture not found: {tex_data.name}")
+            print(f"[CGF] NOT found: {tex_data.name}")
             return None
+        print(f"[CGF] Found: {path}")
         node = nodes.new('ShaderNodeTexImage')
         node.location = (x, y)
         try:
@@ -135,7 +138,7 @@ def build_material(mat_chunk, filepath, import_materials, game_root_path=""):
             img.colorspace_settings.name = color_space
             node.image = img
         except Exception as e:
-            print(f"[CGF] Failed to load texture {path}: {e}")
+            print(f"[CGF] Load error {path}: {e}")
         return node
 
     tex_diff = add_tex(mat_chunk.tex_diffuse, -400, 0)
@@ -247,20 +250,26 @@ def build_mesh(mesh_chunk, node_chunk, archive, collection,
     bm.faces.ensure_lookup_table()
 
     # UVs
-    if import_uvs and mc.tex_vertices and mc.tex_faces:
+    if import_uvs and mc.tex_vertices:
         uv = bm.loops.layers.uv.new("UVMap")
         real_fi = 0
         for fi, cf in enumerate(mc.faces):
             if real_fi >= len(bm.faces): break
-            if fi < len(mc.tex_faces):
-                tf = mc.tex_faces[fi]
-                face = bm.faces[real_fi]
-                for li, loop in enumerate(face.loops):
-                    tvi = [tf.t0, tf.t1, tf.t2][li]
-                    if tvi < len(mc.tex_vertices):
-                        u, v = mc.tex_vertices[tvi]
-                        loop[uv].uv = (u, 1.0 - v)
+            face = bm.faces[real_fi]
             real_fi += 1
+
+            # If texFaces exist use them, otherwise use geometry face indices (Max fallback)
+            if mc.tex_faces and fi < len(mc.tex_faces):
+                tf = mc.tex_faces[fi]
+                tv = [tf.t0, tf.t1, tf.t2]
+            else:
+                tv = [cf.v0, cf.v1, cf.v2]
+
+            for li, loop in enumerate(face.loops):
+                tvi = tv[li]
+                if tvi < len(mc.tex_vertices):
+                    u, v = mc.tex_vertices[tvi]
+                    loop[uv].uv = (u, v)
 
     bm.to_mesh(mesh)
     bm.free()
