@@ -11,10 +11,41 @@ bl_info = {
 import bpy
 import os
 from bpy.props import StringProperty, BoolProperty, EnumProperty
+from bpy.types import AddonPreferences
 from bpy_extras.io_utils import ImportHelper, ExportHelper
 from . import cgf_reader
 from . import cgf_builder
 from . import cgf_exporter
+
+
+# ── Addon Preferences ─────────────────────────────────────────────────────────
+
+class CGFAddonPreferences(AddonPreferences):
+    bl_idname = __name__
+
+    game_root_path: StringProperty(
+        name="Game Root Path",
+        description="Root folder of Far Cry installation (where Objects/, Textures/ etc. are). "
+                    "Used globally for all CGF imports to find textures automatically.",
+        default="",
+        subtype='DIR_PATH',
+    )
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="Far Cry / CryEngine 1 Settings:", icon='SETTINGS')
+        layout.prop(self, "game_root_path")
+        if not self.game_root_path:
+            layout.label(text="⚠  Set this to your Far Cry install folder (e.g. C:\\FarCry)",
+                         icon='ERROR')
+
+
+def get_game_root_path():
+    """Get the globally configured game root path from addon preferences."""
+    prefs = bpy.context.preferences.addons.get(__name__)
+    if prefs:
+        return prefs.preferences.game_root_path
+    return ""
 
 
 # ── CGF / CGA geometry importer ───────────────────────────────────────────────
@@ -38,11 +69,17 @@ class ImportCGF(bpy.types.Operator, ImportHelper):
         description="Build armature from bone chunks", default=False)
     import_weights: BoolProperty(name="Import Vertex Weights",
         description="Assign bone weights for skinned meshes", default=False)
-    game_root_path: StringProperty(name="Game Root Path",
-        description="Root folder of Far Cry (where Objects/, Textures/ are). Used to find textures.",
-        default="", subtype='DIR_PATH')
+    game_root_override: StringProperty(
+        name="Override Game Root",
+        description="Override the global Game Root Path for this import only. "
+                    "Leave empty to use the path from Addon Preferences.",
+        default="",
+        subtype='DIR_PATH',
+    )
 
     def execute(self, context):
+        # Use per-import override if set, otherwise fall back to global prefs
+        game_root = self.game_root_override.strip() or get_game_root_path()
         result = cgf_builder.load(
             self, context,
             filepath         = self.filepath,
@@ -51,7 +88,7 @@ class ImportCGF(bpy.types.Operator, ImportHelper):
             import_uvs       = self.import_uvs,
             import_skeleton  = self.import_skeleton,
             import_weights   = self.import_weights,
-            game_root_path   = self.game_root_path,
+            game_root_path   = game_root,
         )
         if result == {'FINISHED'}:
             for obj in context.scene.objects:
@@ -73,7 +110,12 @@ class ImportCGF(bpy.types.Operator, ImportHelper):
         box.prop(self, "import_weights")
         box = layout.box()
         box.label(text="Textures", icon='TEXTURE')
-        box.prop(self, "game_root_path")
+        global_root = get_game_root_path()
+        if global_root:
+            box.label(text=f"Global root: {global_root}", icon='CHECKMARK')
+        else:
+            box.label(text="No global root set (see Addon Preferences)", icon='ERROR')
+        box.prop(self, "game_root_override")
 
 
 def _store_ctrl_ids(arm_obj):
@@ -217,6 +259,7 @@ def menu_export(self, context):
 
 
 def register():
+    bpy.utils.register_class(CGFAddonPreferences)
     bpy.utils.register_class(ImportCGF)
     bpy.utils.register_class(ImportCAF)
     bpy.utils.register_class(ImportCAL)
@@ -228,6 +271,7 @@ def register():
 
 
 def unregister():
+    bpy.utils.unregister_class(CGFAddonPreferences)
     bpy.utils.unregister_class(ImportCGF)
     bpy.utils.unregister_class(ImportCAF)
     bpy.utils.unregister_class(ImportCAL)
