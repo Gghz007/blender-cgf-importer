@@ -14,7 +14,8 @@ Ported from the original [CryImporter for 3ds Max 8](https://www.takaro.net) by 
 - `.cal` animation list files (multiple animations at once)
 - Mesh with correct vertex positions, normals, and UV coordinates
 - Multi-material support with correct face material assignment
-- Texture auto-detection by game root path or relative path
+- **Automatic texture loading** — set your Far Cry folder once in Addon Preferences and all textures load automatically
+- Supports `.dds`, `.tga`, `.tif`, `.tiff`, `.png`, `.jpg`, `.bmp` texture formats
 - Skeleton / armature import from bone chunks
 - Vertex weights (skinning) for character models
 - Shape keys (morph targets / facial expressions)
@@ -39,6 +40,30 @@ Ported from the original [CryImporter for 3ds Max 8](https://www.takaro.net) by 
 2. In Blender: **Edit → Preferences → Add-ons → Install...**
 3. Select the downloaded `.zip` file
 4. Enable **"CryEngine 1 CGF Importer/Exporter (Far Cry)"**
+5. Click the arrow next to the addon name and set **Game Root Path** to your Far Cry folder (e.g. `C:\FarCry`) — textures will load automatically from now on
+
+---
+
+## Setup — Game Root Path
+
+The most important setting. Set it **once** in Addon Preferences and forget about it.
+
+**Edit → Preferences → Add-ons → CryEngine 1 CGF → Game Root Path**
+
+Set this to the root of your Far Cry installation — the folder that contains `Objects\`, `Textures\`, `Levels\` etc.
+
+```
+C:\FarCry\             ← set this
+├── Objects\
+│   └── Characters\
+│       └── model.cgf
+└── Textures\
+    └── texture.tif
+```
+
+Textures in CGF files are stored as relative paths from this root (e.g. `Objects\Characters\...\texture.dds`). The addon strips the extension and tries all supported formats — so `.dds` references in the CGF will also find `.tif` files in the same location.
+
+You can override the path per-import in the import dialog if needed.
 
 ---
 
@@ -52,20 +77,10 @@ Ported from the original [CryImporter for 3ds Max 8](https://www.takaro.net) by 
 |---|---|
 | Import UVs | Import texture coordinates |
 | Import Normals | Use normals from file |
-| Import Materials | Create Principled BSDF materials |
+| Import Materials | Create Principled BSDF materials and load textures |
 | Import Skeleton | Build armature from bone chunks |
 | Import Vertex Weights | Assign bone weights |
-| Game Root Path | Root folder of Far Cry (e.g. `C:\FarCry`) — used to find textures by relative path |
-
-**Required file layout:**
-```
-FarCry\
-├── Objects\
-│   └── Characters\
-│       └── model.cgf    ← select this
-└── Textures\
-    └── texture.dds      ← found automatically via Game Root Path
-```
+| Override Game Root | Override the global path for this import only |
 
 ---
 
@@ -75,7 +90,6 @@ FarCry\
 
 The addon **automatically finds and imports the CGF** from the same folder. No manual CGF import needed.
 
-**Required file layout:**
 ```
 any_folder\
 ├── model.cgf    ← found and imported automatically
@@ -88,9 +102,8 @@ any_folder\
 
 **File → Import → CryEngine Animation List (.cal)**
 
-Reads the CAL file, auto-imports the CGF, then imports all listed CAF files as separate Actions.
+Reads the CAL file, auto-imports the CGF, then imports all listed CAF files as separate Actions. Switch between them in the **Action Editor**.
 
-**Required file layout:**
 ```
 any_folder\
 ├── model.cgf    ← found automatically
@@ -99,8 +112,6 @@ any_folder\
 ├── walk.caf
 └── run.caf
 ```
-
-After import, switch between animations in the **Action Editor**.
 
 ---
 
@@ -118,19 +129,21 @@ After import, switch between animations in the **Action Editor**.
 | Export Vertex Weights | Write physique (bone weights) |
 
 **Important for round-trip (import → modify → export):**
-1. Import CGF with the new addon version — material shader names are stored as custom properties
+1. Import CGF with this addon — material shader names are stored as `cgf_full_name` custom property
 2. Modify the mesh in Blender
 3. Export — shader names are preserved automatically
 
-**For new models:** add a custom property `cgf_full_name` to each material with the value in format `materialname(ShaderName)/surfaceName`, e.g. `mymat(Phong)/mat_default`. Without a shader name the engine will not render the mesh.
+**For new models from scratch:** add a custom property `cgf_full_name` to each material with the full name format: `materialname(ShaderName)/surfaceName`
+
+Example: `mywall(Phong)/mat_concrete`
+
+Without a shader name the engine will not render the mesh.
 
 ---
 
 ### Animation — CAF
 
 **File → Export → CryEngine Animation (.caf)**
-
-Exports the active Action on the selected armature as a CAF file.
 
 Select the armature, set the active Action in the Action Editor, then export.
 
@@ -140,7 +153,24 @@ Select the armature, set the active Action in the Action Editor, then export.
 
 **File → Export → CryEngine Animation List (.cal)**
 
-Exports **all Actions** that have bone animation curves as individual CAF files, then writes a CAL list file referencing them all.
+Exports all Actions that have bone animation curves as individual CAF files, then writes a CAL list file referencing them all.
+
+---
+
+## Material Name Format
+
+CryEngine embeds the shader name inside the material name string:
+
+```
+materialname(ShaderName)/surfaceName
+```
+
+Examples from Far Cry:
+- `s_mut_abrr(TemplBumpSpec_GlossAlpha)/mat_default`
+- `floor(Phong)/mat_concrete`
+- `coa_arm_frame(TemplModelCommon)/mat_metal_plate`
+
+This full name is stored as `cgf_full_name` custom property on imported materials and restored on export.
 
 ---
 
@@ -150,7 +180,7 @@ Exports **all Actions** that have bone animation curves as individual CAF files,
 |---|---|
 | `0x0000` Mesh | Geometry, UVs, normals, vertex colors, bone weights |
 | `0x000B` Node | Scene hierarchy and world transform |
-| `0x000C` Material | Colors, shader name, texture references |
+| `0x000C` Material | Colors, shader name, texture references (v745/v746) |
 | `0x0003` BoneAnim | Skeleton definition |
 | `0x0005` BoneNameList | Bone names (v745 and other versions) |
 | `0x000D` Controller | Animation keys (v826 typed and v827 pos+rotLog) |
@@ -167,24 +197,8 @@ Exports **all Actions** that have bone animation curves as individual CAF files,
 CryEngine 1 / Far Cry was authored in **3ds Max with inches**.
 
 - **Scale:** `1 Max inch = 0.0254 Blender meters` — applied automatically on import and export
-- **Axes:** Max/CryEngine Z-up ↔ Blender Z-up (compatible, node transforms handle orientation)
+- **Axes:** Max/CryEngine Z-up ↔ Blender Z-up (compatible)
 - **Object scale:** always `(1, 1, 1)` — scale is baked into vertex coordinates
-
----
-
-## Material Name Format
-
-CryEngine embeds the shader name inside the material name string:
-
-```
-materialname(ShaderName)/surfaceName
-```
-
-Examples from Far Cry:
-- `s_mut_abrr(TemplBumpSpec_GlossAlpha)/mat_default`
-- `floor(Phong)/mat_concrete`
-
-This full name is stored as `cgf_full_name` custom property on imported materials and restored on export. For new materials, set this property manually.
 
 ---
 
