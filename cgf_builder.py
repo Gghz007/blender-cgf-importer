@@ -132,7 +132,9 @@ def build_material(mat_chunk, filepath, import_materials, game_root_path=""):
         _set_input(bsdf, 'Roughness',
                    value=1.0 - min(mat_chunk.specular_shininess/100.0, 1.0))
 
-    if mat_chunk.opacity < 1.0:
+    # opacity: 0.0 in CGF often means "unused", not "fully transparent"
+    # Only apply if it's a meaningful value between 0 and 1 (exclusive)
+    if 0.0 < mat_chunk.opacity < 1.0:
         _set_input(bsdf, 'Alpha', value=mat_chunk.opacity)
         if hasattr(mat, 'blend_method'):
             mat.blend_method = 'BLEND'
@@ -183,7 +185,7 @@ def _find_texture(name, cgf_path, game_root_path=""):
     name = name.replace('\\', os.sep).replace('/', os.sep)
     basename = os.path.basename(name)
     cgf_dir  = os.path.dirname(cgf_path)
-    exts     = ['', '.dds', '.tga', '.png', '.jpg', '.bmp']
+    exts     = ['', '.dds', '.tga', '.png', '.jpg', '.bmp', '.tif', '.tiff']
 
     def try_path(p):
         if os.path.isfile(p): return p
@@ -196,6 +198,7 @@ def _find_texture(name, cgf_path, game_root_path=""):
     if game_root_path:
         r = try_path(os.path.join(game_root_path, name))
         if r: return r
+        print(f"[CGF] Texture not found in game root: {os.path.join(game_root_path, name)}")
 
     r = try_path(os.path.join(cgf_dir, name))
     if r: return r
@@ -203,6 +206,7 @@ def _find_texture(name, cgf_path, game_root_path=""):
     r = try_path(os.path.join(cgf_dir, basename))
     if r: return r
 
+    print(f"[CGF] Texture not found anywhere: '{name}'")
     return None
 
 
