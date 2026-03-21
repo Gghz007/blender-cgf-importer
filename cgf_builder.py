@@ -112,6 +112,26 @@ def build_material(mat_chunk, filepath, import_materials, game_root_path=""):
     mat['cgf_full_name']    = _build_cgf_mat_name(mat_chunk.name,
                                                     mat_chunk.shader_name,
                                                     mat_chunk.surface_name)
+    # Populate CryEngine panel properties
+    if hasattr(mat, 'cry'):
+        # Set shader — check if it matches a preset
+        shader = mat_chunk.shader_name or ''
+        preset_values = [item[0] for item in [
+            ('Phong',''),('TemplModelCommon',''),('TemplBumpDiffuse',''),
+            ('TemplBumpSpec',''),('TemplBumpSpec_GlossAlpha',''),
+            ('NoDraw',''),('Glass',''),('Vegetation',''),('Terrain',''),
+        ]]
+        if shader in preset_values:
+            mat.cry.shader_preset = shader
+        else:
+            mat.cry.shader_preset = 'custom'
+            mat.cry.shader_custom = shader
+        # Set surface
+        surface = mat_chunk.surface_name or 'mat_default'
+        try:
+            mat.cry.surface = surface
+        except Exception:
+            mat.cry.surface = 'mat_default'
     mat.use_nodes = True
     nodes = mat.node_tree.nodes
     links = mat.node_tree.links
@@ -165,12 +185,29 @@ def build_material(mat_chunk, filepath, import_materials, game_root_path=""):
     tex_diff = add_tex(mat_chunk.tex_diffuse, -400, 0)
     if tex_diff:
         links.new(tex_diff.outputs['Color'], bsdf.inputs['Base Color'])
+        # Gloss packed in diffuse alpha → connect to Specular
+        shader_name = mat_chunk.shader_name or ''
+        if 'GlossAlpha' in shader_name or 'glossalpha' in shader_name.lower():
+            spec_input = (bsdf.inputs.get('Specular IOR Level') or
+                          bsdf.inputs.get('Specular'))
+            if spec_input:
+                links.new(tex_diff.outputs['Alpha'], spec_input)
 
     tex_bump = add_tex(mat_chunk.tex_bump, -600, -300, 'Non-Color')
     if tex_bump:
-        bump = nodes.new('ShaderNodeBump'); bump.location = (-200, -300)
-        links.new(tex_bump.outputs['Color'], bump.inputs['Height'])
-        links.new(bump.outputs['Normal'], bsdf.inputs['Normal'])
+        tex_name = (mat_chunk.tex_bump.name or '').lower()
+        if '_ddn' in tex_name:
+            # DDN = normal map
+            normal_map = nodes.new('ShaderNodeNormalMap')
+            normal_map.location = (-200, -300)
+            links.new(tex_bump.outputs['Color'], normal_map.inputs['Color'])
+            links.new(normal_map.outputs['Normal'], bsdf.inputs['Normal'])
+        else:
+            # _bump or other = heightmap → Bump node
+            bump = nodes.new('ShaderNodeBump')
+            bump.location = (-200, -300)
+            links.new(tex_bump.outputs['Color'], bump.inputs['Height'])
+            links.new(bump.outputs['Normal'], bsdf.inputs['Normal'])
 
     return mat
 
@@ -437,6 +474,20 @@ def build_armature(archive, collection):
 
     with bpy.context.temp_override(**ctx):
         bpy.ops.object.mode_set(mode='OBJECT')
+
+    # Store original CGF bone matrices on armature for round-trip export
+    # Must be done AFTER exit from edit mode (data bones are accessible now)
+    cgf_matrices = {}
+    for bone in archive.bone_anim_chunks[0].bones:
+        bid   = bone.bone_id
+        bname = names[bid] if bid < len(names) else (bone.name or f"Bone_{bid}")
+        init  = archive.get_bone_initial_pos(bid)
+        if init:
+            cgf_matrices[bname] = list(init)
+
+    if cgf_matrices:
+        import json
+        arm_obj['cgf_bone_matrices'] = json.dumps(cgf_matrices)
 
     return arm_obj, arm_data
 
@@ -804,12 +855,30 @@ def _ensure_armature(operator, context, anim_filepath):
                     if arm_obj.pose and bname in arm_obj.pose.bones:
                         arm_obj.pose.bones[bname]['cry_ctrl_id'] = bone.ctrl_id
 
+    # Get game root from addon preferences
+    game_root_path = ""
+    try:
+        prefs = bpy.context.preferences.addons.get('io_import_cgf')
+        if prefs:
+            game_root_path = prefs.preferences.game_root_path
+    except Exception:
+        pass
+
+    blender_materials = {}
+    for mc in archive.material_chunks:
+        standard_chunks = []
+        _collect_standard_chunks(mc, archive, standard_chunks)
+        for std in standard_chunks:
+            if std.name not in blender_materials:
+                bmat = build_material(std, cgf_path, True, game_root_path)
+                if bmat: blender_materials[std.name] = bmat
+
     for mc in archive.mesh_chunks:
         node = archive.get_node(mc.header.chunk_id)
         build_mesh(mc, node, archive, collection,
-                   import_materials=False, import_normals=False,
-                   import_uvs=False, import_weights=True,
-                   blender_materials={}, filepath=cgf_path)
+                   import_materials=True, import_normals=True,
+                   import_uvs=True, import_weights=True,
+                   blender_materials=blender_materials, filepath=cgf_path)
 
     if arm_obj is None:
         operator.report({'ERROR'},
