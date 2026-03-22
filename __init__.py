@@ -84,8 +84,10 @@ class CryMaterialProperties(PropertyGroup):
 
 def _update_cgf_full_name(self, context):
     """Rebuild cgf_full_name whenever shader or surface changes."""
-    mat = context.material
+    mat = getattr(context, "material", None)
     if mat is None:
+        mat = getattr(self, "id_data", None)
+    if mat is None or not isinstance(mat, bpy.types.Material):
         return
     cry = mat.cry
     shader = cry.shader_custom if cry.shader_preset == 'custom' else cry.shader_preset
@@ -170,6 +172,45 @@ def get_game_root_path():
     return ""
 
 
+def _scene_meshes(context, selected_only=False):
+    source = context.selected_objects if selected_only else context.view_layer.objects
+    return [o for o in source if o.type == 'MESH' and not o.hide_get()]
+
+
+def _find_export_armature(context, meshes=None):
+    meshes = meshes or []
+    active = context.active_object
+    if active and active.type == 'ARMATURE' and not active.hide_get():
+        return active
+    for obj in context.view_layer.objects:
+        if obj.type == 'ARMATURE' and not obj.hide_get():
+            return obj
+    for obj in meshes:
+        for mod in obj.modifiers:
+            if mod.type == 'ARMATURE' and mod.object:
+                return mod.object
+    return None
+
+
+def _has_skinned_meshes(meshes, arm_obj):
+    if not arm_obj:
+        return False
+    for obj in meshes:
+        if any(mod.type == 'ARMATURE' and mod.object == arm_obj for mod in obj.modifiers):
+            return True
+    return False
+
+
+def _actions_for_armature(arm_obj):
+    if arm_obj is None:
+        return []
+    result = []
+    for action in bpy.data.actions:
+        if any(fc.data_path.startswith('pose.bones[') for fc in action.fcurves):
+            result.append(action)
+    return result
+
+
 # ── CGF / CGA geometry importer ───────────────────────────────────────────────
 
 class ImportCGF(bpy.types.Operator, ImportHelper):
@@ -179,7 +220,7 @@ class ImportCGF(bpy.types.Operator, ImportHelper):
     bl_options = {'PRESET', 'UNDO'}
 
     filename_ext = ".cgf"
-    filter_glob: StringProperty(default="*.cgf;*.cga", options={'HIDDEN'})
+    filter_glob: StringProperty(default="*.cgf;*.cga;*.bld", options={'HIDDEN'})
 
     import_materials: BoolProperty(name="Import Materials",
         description="Create Principled BSDF materials", default=True)
@@ -280,6 +321,26 @@ class ImportCAF(bpy.types.Operator, ImportHelper):
         self.layout.prop(self, "append")
 
 
+class ImportANM(bpy.types.Operator, ImportHelper):
+    """Import CryEngine 1 ANM animation file onto the active armature"""
+    bl_idname  = "import_scene.anm"
+    bl_label   = "Import ANM Animation"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    filename_ext = ".anm"
+    filter_glob: StringProperty(default="*.anm", options={'HIDDEN'})
+
+    append: BoolProperty(name="Append to Timeline",
+        description="Add after existing animation range", default=True)
+
+    def execute(self, context):
+        # CE1 ANM is treated here as the same animation container class as CAF.
+        return cgf_builder.load_caf(self, context, self.filepath, self.append)
+
+    def draw(self, context):
+        self.layout.prop(self, "append")
+
+
 # ── CAL animation list importer ───────────────────────────────────────────────
 
 class ImportCAL(bpy.types.Operator, ImportHelper):
@@ -316,7 +377,7 @@ class ExportCGF(bpy.types.Operator, ExportHelper):
         description="Export only selected mesh objects", default=False)
 
     def execute(self, context):
-        return cgf_exporter.export_cgf(
+        return cgf_exporter.export_cgf_scene(
             self, context, self.filepath,
             export_materials = self.export_materials,
             export_skeleton  = self.export_skeleton,
@@ -336,6 +397,170 @@ class ExportCGF(bpy.types.Operator, ExportHelper):
         box.prop(self, "export_weights")
 
 
+class ExportCGA(bpy.types.Operator, ExportHelper):
+    """Export to CryEngine 1 CGA animated geometry file (Far Cry)"""
+    bl_idname  = "export_scene.cga"
+    bl_label   = "Export CGA"
+    bl_options = {'PRESET'}
+
+    filename_ext = ".cga"
+    filter_glob: StringProperty(default="*.cga", options={'HIDDEN'})
+
+    export_materials: BoolProperty(name="Export Materials",
+        description="Write material chunks", default=True)
+    export_skeleton: BoolProperty(name="Export Skeleton",
+        description="Write bone chunks from active armature", default=True)
+    export_weights: BoolProperty(name="Export Vertex Weights",
+        description="Write physique (bone weights)", default=True)
+    selected_only: BoolProperty(name="Selected Only",
+        description="Export only selected mesh objects", default=False)
+
+    def execute(self, context):
+        return cgf_exporter.export_cgf_scene(
+            self, context, self.filepath,
+            export_materials = self.export_materials,
+            export_skeleton  = self.export_skeleton,
+            export_weights   = self.export_weights,
+            selected_only    = self.selected_only,
+        )
+
+    def draw(self, context):
+        layout = self.layout
+        box = layout.box()
+        box.label(text="Geometry", icon='MESH_DATA')
+        box.prop(self, "selected_only")
+        box.prop(self, "export_materials")
+        box = layout.box()
+        box.label(text="Skinning", icon='ARMATURE_DATA')
+        box.prop(self, "export_skeleton")
+        box.prop(self, "export_weights")
+
+
+class ExportBLD(bpy.types.Operator, ExportHelper):
+    """Export to CryEngine 1 BLD building geometry file (Far Cry)"""
+    bl_idname  = "export_scene.bld"
+    bl_label   = "Export BLD"
+    bl_options = {'PRESET'}
+
+    filename_ext = ".bld"
+    filter_glob: StringProperty(default="*.bld", options={'HIDDEN'})
+
+    export_materials: BoolProperty(name="Export Materials",
+        description="Write material chunks", default=True)
+    export_skeleton: BoolProperty(name="Export Skeleton",
+        description="Write bone chunks from active armature", default=False)
+    export_weights: BoolProperty(name="Export Vertex Weights",
+        description="Write physique (bone weights)", default=False)
+    selected_only: BoolProperty(name="Selected Only",
+        description="Export only selected mesh objects", default=False)
+
+    def execute(self, context):
+        return cgf_exporter.export_cgf_scene(
+            self, context, self.filepath,
+            export_materials = self.export_materials,
+            export_skeleton  = self.export_skeleton,
+            export_weights   = self.export_weights,
+            selected_only    = self.selected_only,
+        )
+
+    def draw(self, context):
+        layout = self.layout
+        box = layout.box()
+        box.label(text="Geometry", icon='MESH_DATA')
+        box.prop(self, "selected_only")
+        box.prop(self, "export_materials")
+        box = layout.box()
+        box.label(text="Skinning", icon='ARMATURE_DATA')
+        box.prop(self, "export_skeleton")
+        box.prop(self, "export_weights")
+
+
+class ExportCryAuto(bpy.types.Operator, ExportHelper):
+    """Auto export CryEngine assets based on scene contents"""
+    bl_idname  = "export_scene.cry_auto"
+    bl_label   = "Auto Export CryEngine Asset"
+    bl_options = {'PRESET'}
+
+    filename_ext = ".cgf"
+    filter_glob: StringProperty(default="*.cgf;*.cga;*.bld;*.caf;*.cal;*.anm", options={'HIDDEN'})
+
+    export_materials: BoolProperty(name="Export Materials",
+        description="Write material chunks", default=True)
+    selected_only: BoolProperty(name="Selected Only",
+        description="Export only selected mesh objects", default=False)
+    export_animation_set: BoolProperty(name="Export CAL/CAF When Present",
+        description="If the scene has armature actions, also write CAL+CAF next to geometry", default=True)
+    prefer_cga_for_skinned: BoolProperty(name="Use CGA For Skinned Meshes",
+        description="Skinned geometry is exported as .cga instead of .cgf", default=True)
+
+    def execute(self, context):
+        meshes = _scene_meshes(context, self.selected_only)
+        if not meshes:
+            self.report({'ERROR'}, "No visible mesh objects found")
+            return {'CANCELLED'}
+
+        arm_obj = _find_export_armature(context, meshes)
+        has_skinned = _has_skinned_meshes(meshes, arm_obj)
+        actions = _actions_for_armature(arm_obj)
+
+        base_dir = os.path.dirname(self.filepath)
+        base_name = os.path.splitext(os.path.basename(self.filepath))[0]
+
+        geom_ext = ".cga" if (has_skinned and self.prefer_cga_for_skinned) else ".cgf"
+        geom_path = os.path.join(base_dir, base_name + geom_ext)
+
+        active_before = context.view_layer.objects.active
+        selected_before = list(context.selected_objects)
+
+        if arm_obj:
+            try:
+                context.view_layer.objects.active = arm_obj
+            except Exception:
+                pass
+
+        result = cgf_exporter.export_cgf_scene(
+            self, context, geom_path,
+            export_materials=self.export_materials,
+            export_skeleton=bool(arm_obj),
+            export_weights=has_skinned,
+            selected_only=self.selected_only,
+        )
+        if result != {'FINISHED'}:
+            return result
+
+        exported = [os.path.basename(geom_path)]
+
+        if self.export_animation_set and arm_obj and actions:
+            cal_path = os.path.join(base_dir, base_name + ".cal")
+            result = cgf_exporter.export_cal(self, context, cal_path)
+            if result == {'FINISHED'}:
+                exported.append(os.path.basename(cal_path))
+
+        try:
+            context.view_layer.objects.active = active_before
+            for obj in context.view_layer.objects:
+                obj.select_set(False)
+            for obj in selected_before:
+                if obj.name in context.view_layer.objects:
+                    obj.select_set(True)
+        except Exception:
+            pass
+
+        self.report({'INFO'}, "Auto exported: " + ", ".join(exported))
+        return {'FINISHED'}
+
+    def draw(self, context):
+        layout = self.layout
+        box = layout.box()
+        box.label(text="Detection", icon='FILE_TICK')
+        box.prop(self, "selected_only")
+        box.prop(self, "prefer_cga_for_skinned")
+        box.prop(self, "export_animation_set")
+        box = layout.box()
+        box.label(text="Geometry", icon='MESH_DATA')
+        box.prop(self, "export_materials")
+
+
 # ── CAF exporter ──────────────────────────────────────────────────────────────
 
 class ExportCAF(bpy.types.Operator, ExportHelper):
@@ -348,6 +573,20 @@ class ExportCAF(bpy.types.Operator, ExportHelper):
     filter_glob: StringProperty(default="*.caf", options={'HIDDEN'})
 
     def execute(self, context):
+        return cgf_exporter.export_caf(self, context, self.filepath)
+
+
+class ExportANM(bpy.types.Operator, ExportHelper):
+    """Export active action to CryEngine 1 ANM animation file"""
+    bl_idname  = "export_scene.anm"
+    bl_label   = "Export ANM Animation"
+    bl_options = {'PRESET'}
+
+    filename_ext = ".anm"
+    filter_glob: StringProperty(default="*.anm", options={'HIDDEN'})
+
+    def execute(self, context):
+        # Current backend writes the generic CE1 animation container used by CAF/ANM.
         return cgf_exporter.export_caf(self, context, self.filepath)
 
 
@@ -369,14 +608,19 @@ class ExportCAL(bpy.types.Operator, ExportHelper):
 # ── Menu entries ──────────────────────────────────────────────────────────────
 
 def menu_import(self, context):
-    self.layout.operator(ImportCGF.bl_idname, text="CryEngine Geometry (.cgf, .cga)")
+    self.layout.operator(ImportCGF.bl_idname, text="CryEngine Geometry (.cgf, .cga, .bld)")
     self.layout.operator(ImportCAF.bl_idname, text="CryEngine Animation (.caf)")
+    self.layout.operator(ImportANM.bl_idname, text="CryEngine Animation (.anm)")
     self.layout.operator(ImportCAL.bl_idname, text="CryEngine Animation List (.cal)")
 
 
 def menu_export(self, context):
+    self.layout.operator(ExportCryAuto.bl_idname, text="CryEngine Auto Export")
     self.layout.operator(ExportCGF.bl_idname, text="CryEngine Geometry (.cgf)")
+    self.layout.operator(ExportCGA.bl_idname, text="CryEngine Animated Geometry (.cga)")
+    self.layout.operator(ExportBLD.bl_idname, text="CryEngine Building (.bld)")
     self.layout.operator(ExportCAF.bl_idname, text="CryEngine Animation (.caf)")
+    self.layout.operator(ExportANM.bl_idname, text="CryEngine Animation (.anm)")
     self.layout.operator(ExportCAL.bl_idname, text="CryEngine Animation List (.cal)")
 
 
@@ -386,9 +630,14 @@ def register():
     bpy.utils.register_class(VIEW3D_PT_cryengine)
     bpy.utils.register_class(ImportCGF)
     bpy.utils.register_class(ImportCAF)
+    bpy.utils.register_class(ImportANM)
     bpy.utils.register_class(ImportCAL)
     bpy.utils.register_class(ExportCGF)
+    bpy.utils.register_class(ExportCGA)
+    bpy.utils.register_class(ExportBLD)
+    bpy.utils.register_class(ExportCryAuto)
     bpy.utils.register_class(ExportCAF)
+    bpy.utils.register_class(ExportANM)
     bpy.utils.register_class(ExportCAL)
     bpy.types.Material.cry = bpy.props.PointerProperty(type=CryMaterialProperties)
     bpy.types.TOPBAR_MT_file_import.append(menu_import)
@@ -401,9 +650,14 @@ def unregister():
     bpy.utils.unregister_class(VIEW3D_PT_cryengine)
     bpy.utils.unregister_class(ImportCGF)
     bpy.utils.unregister_class(ImportCAF)
+    bpy.utils.unregister_class(ImportANM)
     bpy.utils.unregister_class(ImportCAL)
     bpy.utils.unregister_class(ExportCGF)
+    bpy.utils.unregister_class(ExportCGA)
+    bpy.utils.unregister_class(ExportBLD)
+    bpy.utils.unregister_class(ExportCryAuto)
     bpy.utils.unregister_class(ExportCAF)
+    bpy.utils.unregister_class(ExportANM)
     bpy.utils.unregister_class(ExportCAL)
     del bpy.types.Material.cry
     bpy.types.TOPBAR_MT_file_import.remove(menu_import)
