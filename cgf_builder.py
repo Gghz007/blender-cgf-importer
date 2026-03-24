@@ -90,6 +90,120 @@ def _build_cgf_mat_name(name, shader_name, surface_name):
     return result
 
 
+def _round_tuple(values, digits=6):
+    return tuple(round(float(v), digits) for v in values)
+
+
+def _normalize_material_texture_key(tex_data, filepath, game_root_path=""):
+    if not tex_data or not tex_data.name:
+        return ""
+
+    resolved = _find_texture(tex_data.name, filepath, game_root_path)
+    if resolved:
+        return os.path.normcase(os.path.abspath(resolved))
+
+    raw = tex_data.name.replace('\\', os.sep).replace('/', os.sep)
+    return os.path.normcase(os.path.splitext(raw)[0])
+
+
+def _material_signature(mat_chunk, filepath, game_root_path=""):
+    return (
+        (mat_chunk.shader_name or '').strip().lower(),
+        (mat_chunk.surface_name or '').strip().lower(),
+        _normalize_material_texture_key(mat_chunk.tex_diffuse, filepath, game_root_path),
+        _normalize_material_texture_key(mat_chunk.tex_bump, filepath, game_root_path),
+        _normalize_material_texture_key(mat_chunk.tex_detail, filepath, game_root_path),
+        _normalize_material_texture_key(mat_chunk.tex_specular, filepath, game_root_path),
+        _normalize_material_texture_key(mat_chunk.tex_reflection, filepath, game_root_path),
+        _round_tuple(mat_chunk.diffuse),
+        _round_tuple(mat_chunk.specular),
+        _round_tuple(mat_chunk.ambient),
+        round(float(mat_chunk.specular_level), 6),
+        round(float(mat_chunk.specular_shininess), 6),
+        round(float(mat_chunk.self_illumination), 6),
+        round(float(mat_chunk.opacity), 6),
+        round(float(mat_chunk.alpha_test), 6),
+        int(mat_chunk.type),
+        int(mat_chunk.flags),
+    )
+
+
+def _is_nodraw_material(mat_chunk):
+    shader = (mat_chunk.shader_name or '').strip().lower()
+    surface = (mat_chunk.surface_name or '').strip().lower()
+    diffuse = ((getattr(mat_chunk.tex_diffuse, 'name', '') or '')
+               .replace('\\', '/').strip().lower())
+
+    if shader in {'nodraw', 'no_draw'}:
+        return True
+    if surface in {'mat_obstruct', 'mat_nodraw'}:
+        return True
+    if diffuse.endswith('/nodraw.dds') or diffuse.endswith('common/nodraw.dds'):
+        return True
+    return False
+
+
+def _global_standard_material_chunks(archive):
+    result = []
+    for mc in archive.material_chunks:
+        if mc.type == 2:
+            continue
+        result.append(mc)
+    return result
+
+
+def _mesh_is_collision_like(mesh_chunk, archive):
+    global_chunks = _global_standard_material_chunks(archive)
+    face_mat_ids = sorted({face.mat_id for face in mesh_chunk.faces if face.mat_id >= 0})
+    if not face_mat_ids:
+        return False
+
+    resolved = []
+    for face_mat_id in face_mat_ids:
+        if face_mat_id >= len(global_chunks):
+            return False
+        resolved.append(global_chunks[face_mat_id])
+
+    return bool(resolved) and all(_is_nodraw_material(mat) for mat in resolved)
+
+
+def _global_collision_material_ids(archive):
+    result = set()
+    for idx, mat in enumerate(_global_standard_material_chunks(archive)):
+        if _is_nodraw_material(mat):
+            result.add(idx)
+    return result
+
+
+def _uses_diffuse_alpha_as_opacity(mat_chunk):
+    shader = (mat_chunk.shader_name or '').strip().lower()
+    diffuse = ((getattr(mat_chunk.tex_diffuse, 'name', '') or '')
+               .replace('\\', '/').strip().lower())
+
+    if 'glossalpha' in shader:
+        return False
+    if shader in {'glass', 'vegetation'}:
+        return True
+    if mat_chunk.alpha_test > 0.0:
+        return True
+    if any(token in diffuse for token in ('chainlink', 'fence', 'grate', 'wire', 'mesh', 'net')):
+        return True
+    return False
+
+
+def _configure_diffuse_image_alpha(img, mat_chunk):
+    if img is None or not hasattr(img, 'alpha_mode'):
+        return
+    try:
+        if _uses_diffuse_alpha_as_opacity(mat_chunk):
+            if img.alpha_mode == 'NONE':
+                img.alpha_mode = 'STRAIGHT'
+        else:
+            img.alpha_mode = 'NONE'
+    except Exception:
+        pass
+
+
 def _set_input(node, *names, value):
     for name in names:
         if name in node.inputs:
@@ -104,15 +218,14 @@ def build_material(mat_chunk, filepath, import_materials, game_root_path=""):
     full_name = _build_cgf_mat_name(mat_chunk.name,
                                     mat_chunk.shader_name,
                                     mat_chunk.surface_name)
-    mat = bpy.data.materials.get(full_name)
-    if mat:
-        return mat
 
     mat = bpy.data.materials.new(name=full_name)
     # Store original CGF material info for round-trip export
+    mat['cgf_chunk_id']     = int(mat_chunk.header.chunk_id)
     mat['cgf_shader_name']  = mat_chunk.shader_name
     mat['cgf_surface_name'] = mat_chunk.surface_name
     mat['cgf_full_name']    = full_name
+    mat['cgf_source_name']  = mat_chunk.name
     # Populate CryEngine panel properties
     if hasattr(mat, 'cry'):
         # Set shader — check if it matches a preset
@@ -142,6 +255,18 @@ def build_material(mat_chunk, filepath, import_materials, game_root_path=""):
     bsdf = nodes.new('ShaderNodeBsdfPrincipled'); bsdf.location = (0, 0)
     links.new(bsdf.outputs['BSDF'], out.inputs['Surface'])
 
+    if _is_nodraw_material(mat_chunk):
+        _set_input(bsdf, 'Base Color', value=(0.0, 0.0, 0.0, 1.0))
+        _set_input(bsdf, 'Alpha', value=0.0)
+        if hasattr(mat, 'blend_method'):
+            mat.blend_method = 'CLIP'
+        if hasattr(mat, 'shadow_method'):
+            try:
+                mat.shadow_method = 'NONE'
+            except Exception:
+                pass
+        return mat
+
     d = mat_chunk.diffuse
     _set_input(bsdf, 'Base Color', value=(d[0], d[1], d[2], 1.0))
 
@@ -155,14 +280,13 @@ def build_material(mat_chunk, filepath, import_materials, game_root_path=""):
 
     # opacity: 0.0 in CGF often means "unused", not "fully transparent"
     # Only apply if it's a meaningful value between 0 and 1 (exclusive)
-    if 0.0 < mat_chunk.opacity < 1.0:
+    if 0.0 < mat_chunk.opacity < 1.0 and _uses_diffuse_alpha_as_opacity(mat_chunk):
         _set_input(bsdf, 'Alpha', value=mat_chunk.opacity)
         if hasattr(mat, 'blend_method'):
             mat.blend_method = 'BLEND'
 
     def add_tex(tex_data, x, y, color_space='sRGB'):
         if not tex_data or not tex_data.name:
-            print(f"[CGF] add_tex: tex_data={tex_data}")
             return None
         print(f"[CGF] Searching: '{tex_data.name}' | root='{game_root_path}'")
         path = _find_texture(tex_data.name, filepath, game_root_path)
@@ -185,7 +309,19 @@ def build_material(mat_chunk, filepath, import_materials, game_root_path=""):
 
     tex_diff = add_tex(mat_chunk.tex_diffuse, -400, 0)
     if tex_diff:
+        mat['tex_diffuse'] = bpy.path.abspath(tex_diff.image.filepath) if tex_diff.image else ""
+        _configure_diffuse_image_alpha(tex_diff.image, mat_chunk)
         links.new(tex_diff.outputs['Color'], bsdf.inputs['Base Color'])
+        alpha_input = bsdf.inputs.get('Alpha')
+        if alpha_input and _uses_diffuse_alpha_as_opacity(mat_chunk):
+            links.new(tex_diff.outputs['Alpha'], alpha_input)
+            if hasattr(mat, 'blend_method'):
+                if mat_chunk.alpha_test > 0.0:
+                    mat.blend_method = 'CLIP'
+                elif mat_chunk.opacity < 1.0:
+                    mat.blend_method = 'CLIP'
+                elif tex_diff.image and getattr(tex_diff.image, 'depth', 0) in (32, 64):
+                    mat.blend_method = 'CLIP'
         # Gloss packed in diffuse alpha → connect to Specular
         shader_name = mat_chunk.shader_name or ''
         if 'GlossAlpha' in shader_name or 'glossalpha' in shader_name.lower():
@@ -196,6 +332,7 @@ def build_material(mat_chunk, filepath, import_materials, game_root_path=""):
 
     tex_bump = add_tex(mat_chunk.tex_bump, -600, -300, 'Non-Color')
     if tex_bump:
+        mat['tex_bump'] = bpy.path.abspath(tex_bump.image.filepath) if tex_bump.image else ""
         tex_name = (mat_chunk.tex_bump.name or '').lower()
         if '_ddn' in tex_name:
             # DDN = normal map
@@ -209,6 +346,15 @@ def build_material(mat_chunk, filepath, import_materials, game_root_path=""):
             bump.location = (-200, -300)
             links.new(tex_bump.outputs['Color'], bump.inputs['Height'])
             links.new(bump.outputs['Normal'], bsdf.inputs['Normal'])
+
+    tex_detail = add_tex(mat_chunk.tex_detail, -600, -520, 'Non-Color')
+    if tex_detail:
+        mat['tex_detail'] = bpy.path.abspath(tex_detail.image.filepath) if tex_detail.image else ""
+        detail_bump = nodes.new('ShaderNodeBump')
+        detail_bump.location = (-200, -520)
+        links.new(tex_detail.outputs['Color'], detail_bump.inputs['Height'])
+        if not bsdf.inputs['Normal'].links:
+            links.new(detail_bump.outputs['Normal'], bsdf.inputs['Normal'])
 
     return mat
 
@@ -255,7 +401,8 @@ def _find_texture(name, cgf_path, game_root_path=""):
 
 def build_mesh(mesh_chunk, node_chunk, archive, collection,
                import_materials, import_normals, import_uvs,
-               import_weights, blender_materials, filepath):
+               import_weights, blender_materials, filepath,
+               skip_collision_geometry=False):
 
     mc = mesh_chunk
     if not mc.vertices or not mc.faces:
@@ -277,8 +424,11 @@ def build_mesh(mesh_chunk, node_chunk, archive, collection,
     face_normals = []
     face_material_ids = []
     face_smooth_flags = []
+    collision_material_ids = _global_collision_material_ids(archive) if skip_collision_geometry else set()
 
     for fi, cf in enumerate(mc.faces):
+        if collision_material_ids and cf.mat_id in collision_material_ids:
+            continue
         src_vis = (cf.v0, cf.v1, cf.v2)
         if any(vi >= len(mc.vertices) for vi in src_vis):
             continue
@@ -356,28 +506,20 @@ def build_mesh(mesh_chunk, node_chunk, archive, collection,
     # excluding Multi materials. This matches how Max buildMatMappings() works.
     # We build the same mapping: standard_mat_index → (blender_material, slot_index)
     if import_materials and blender_materials:
-        mat_chunk = archive.get_material_chunk(node_chunk.material_id) if node_chunk else None
-        if mat_chunk:
-            # Collect all standard material chunks in order (same as Max tempStandardMatArray)
-            standard_chunks = []
-            _collect_standard_chunks(mat_chunk, archive, standard_chunks)
-
-            # Add all standard materials as slots and build matID → slot map
-            slot_map = {}  # face.mat_id → mesh material slot index
-            for i, std_chunk in enumerate(standard_chunks):
-                std_key = _build_cgf_mat_name(std_chunk.name,
-                                              std_chunk.shader_name,
-                                              std_chunk.surface_name)
-                if std_key in blender_materials:
-                    bmat = blender_materials[std_key]
-                    if bmat.name not in [m.name for m in mesh.materials]:
-                        mesh.materials.append(bmat)
-                    slot_map[i] = list(mesh.materials).index(bmat)
-
-            # Assign material slots to polygons
-            for pi, poly in enumerate(mesh.polygons):
-                if pi < len(face_material_ids):
-                    poly.material_index = slot_map.get(face_material_ids[pi], 0)
+        global_material_map = _build_global_standard_material_map(archive, blender_materials)
+        slot_map = {}  # face.mat_id → mesh material slot index
+        for pi, poly in enumerate(mesh.polygons):
+            if pi >= len(face_material_ids):
+                continue
+            face_mat_id = face_material_ids[pi]
+            bmat = global_material_map.get(face_mat_id)
+            if bmat is None:
+                continue
+            if bmat.name not in [m.name for m in mesh.materials]:
+                mesh.materials.append(bmat)
+            if face_mat_id not in slot_map:
+                slot_map[face_mat_id] = list(mesh.materials).index(bmat)
+            poly.material_index = slot_map[face_mat_id]
 
     # Transform
     if node_chunk and node_chunk.trans_matrix:
@@ -434,6 +576,47 @@ def _collect_standard_chunks(mat_chunk, archive, result):
 
 
 # ── Armature ──────────────────────────────────────────────────────────────────
+
+def _build_material_cache(archive, filepath, import_materials, game_root_path="", skip_collision_geometry=False):
+    by_name = {}
+    by_signature = {}
+
+    if not import_materials:
+        return by_name, by_signature
+
+    for mc in archive.material_chunks:
+        standard_chunks = []
+        _collect_standard_chunks(mc, archive, standard_chunks)
+        print(f"[CGF]   material chunk: {mc.name} type={mc.type} -> {len(standard_chunks)} standard")
+        for std in standard_chunks:
+            if skip_collision_geometry and _is_nodraw_material(std):
+                continue
+            std_key = _build_cgf_mat_name(std.name, std.shader_name, std.surface_name)
+            signature = _material_signature(std, filepath, game_root_path)
+            bmat = by_signature.get(signature)
+            if bmat is None:
+                bmat = build_material(std, filepath, import_materials, game_root_path)
+                if bmat:
+                    by_signature[signature] = bmat
+            if bmat:
+                by_name[std_key] = bmat
+
+    return by_name, by_signature
+
+
+def _build_global_standard_material_map(archive, blender_materials):
+    slot_map = {}
+    standard_index = 0
+
+    for mc in _global_standard_material_chunks(archive):
+        std_key = _build_cgf_mat_name(mc.name, mc.shader_name, mc.surface_name)
+        bmat = blender_materials.get(std_key)
+        if bmat is not None:
+            slot_map[standard_index] = bmat
+        standard_index += 1
+
+    return slot_map
+
 
 def _source_vert_map_from_object(obj):
     values = obj.get("_cgf_source_vert_ids")
@@ -492,9 +675,15 @@ def build_armature(archive, collection):
             try:
                 mx = cry_matrix43_to_blender(init)
                 head = mx.translation
-                local_x = mx.col[0].xyz.normalized() * (0.05 * INCHES_TO_METERS)
+                local_y = mx.col[1].xyz
+                local_z = mx.col[2].xyz
+                if local_y.length <= 1e-8:
+                    local_y = mathutils.Vector((0, 1, 0))
+                if local_z.length <= 1e-8:
+                    local_z = mathutils.Vector((0, 0, 1))
                 eb.head = head
-                eb.tail = head + local_x
+                eb.tail = head + local_y.normalized() * (0.05 * INCHES_TO_METERS)
+                eb.align_roll(local_z.normalized())
             except Exception as e:
                 print(f"[CGF] Bone matrix error {bname}: {e}")
         eb_map[bid] = eb
@@ -768,7 +957,8 @@ def find_caf_file(caf_name, cal_filepath, geom_filepath):
 
 def load(operator, context, filepath,
          import_materials=True, import_normals=True, import_uvs=True,
-         import_skeleton=True, import_weights=True, game_root_path=""):
+         import_skeleton=True, import_weights=True, game_root_path="",
+         skip_collision_geometry=False):
     """Import a CGF/CGA geometry file."""
 
     print(f"[CGF] Loading: {filepath}")
@@ -790,18 +980,9 @@ def load(operator, context, filepath,
 
     # Materials
     print(f"[CGF] Building materials...")
-    blender_materials = {}
-    if import_materials:
-        for mc in archive.material_chunks:
-            standard_chunks = []
-            _collect_standard_chunks(mc, archive, standard_chunks)
-            print(f"[CGF]   material chunk: {mc.name} type={mc.type} → {len(standard_chunks)} standard")
-            for std in standard_chunks:
-                std_key = _build_cgf_mat_name(std.name, std.shader_name, std.surface_name)
-                if std_key not in blender_materials:
-                    bmat = build_material(std, filepath, import_materials, game_root_path)
-                    if bmat:
-                        blender_materials[std_key] = bmat
+    blender_materials, _ = _build_material_cache(
+        archive, filepath, import_materials, game_root_path, skip_collision_geometry
+    )
     print(f"[CGF] Materials done: {len(blender_materials)}")
 
     # Armature
@@ -816,11 +997,17 @@ def load(operator, context, filepath,
     mesh_objects = []
     for i, mc in enumerate(archive.mesh_chunks):
         print(f"[CGF]   mesh {i}: verts={len(mc.vertices)} faces={len(mc.faces)} bone_info={mc.has_bone_info} physique={len(mc.physique)}")
+        if skip_collision_geometry and _mesh_is_collision_like(mc, archive):
+            print(f"[CGF]   mesh {i} skipped as collision-like geometry")
+            continue
         node = archive.get_node(mc.header.chunk_id)
         obj  = build_mesh(mc, node, archive, collection,
                           import_materials, import_normals, import_uvs,
-                          import_weights, blender_materials, filepath)
+                          import_weights, blender_materials, filepath,
+                          skip_collision_geometry=skip_collision_geometry)
         if obj:
+            obj['cgf_chunk_id'] = int(mc.header.chunk_id)
+            obj['cgf_source_name'] = node.name if node and node.name else obj.name
             mesh_objects.append(obj)
             print(f"[CGF]   mesh {i} done: {obj.name}")
             if archive.mesh_morph_target_chunks:
@@ -829,6 +1016,13 @@ def load(operator, context, filepath,
     print(f"[CGF] All meshes done")
     if arm_obj and import_skeleton and import_weights:
         apply_armature_to_meshes(arm_obj, mesh_objects)
+    if arm_obj and import_skeleton and archive.controller_chunks:
+        action_name = f"{file_name}_Embedded"
+        apply_animation(arm_obj, archive, archive, action_name)
+        try:
+            context.scene.frame_set(context.scene.frame_start)
+        except Exception:
+            pass
 
     bpy.ops.object.select_all(action='DESELECT')
     for obj in collection.objects: obj.select_set(True)
@@ -912,30 +1106,28 @@ def _ensure_armature(operator, context, anim_filepath):
 
     # Get game root from addon preferences
     game_root_path = ""
+    skip_collision_geometry = False
     try:
         prefs = bpy.context.preferences.addons.get('io_import_cgf')
         if prefs:
             game_root_path = prefs.preferences.game_root_path
+            skip_collision_geometry = bool(getattr(prefs.preferences, "skip_collision_geometry", False))
     except Exception:
         pass
 
-    blender_materials = {}
-    for mc in archive.material_chunks:
-        standard_chunks = []
-        _collect_standard_chunks(mc, archive, standard_chunks)
-        for std in standard_chunks:
-            std_key = _build_cgf_mat_name(std.name, std.shader_name, std.surface_name)
-            if std_key not in blender_materials:
-                bmat = build_material(std, cgf_path, True, game_root_path)
-                if bmat:
-                    blender_materials[std_key] = bmat
+    blender_materials, _ = _build_material_cache(
+        archive, cgf_path, True, game_root_path, skip_collision_geometry
+    )
 
     for mc in archive.mesh_chunks:
+        if skip_collision_geometry and _mesh_is_collision_like(mc, archive):
+            continue
         node = archive.get_node(mc.header.chunk_id)
         build_mesh(mc, node, archive, collection,
                    import_materials=True, import_normals=True,
                    import_uvs=True, import_weights=True,
-                   blender_materials=blender_materials, filepath=cgf_path)
+                   blender_materials=blender_materials, filepath=cgf_path,
+                   skip_collision_geometry=skip_collision_geometry)
 
     if arm_obj is None:
         operator.report({'ERROR'},
