@@ -1,10 +1,10 @@
 bl_info = {
-    "name": "CryEngine 1 CGF Importer/Exporter (Far Cry)",
+    "name": "CryEngine 1 Asset Importer/Exporter (Far Cry)",
     "author": "Ported from Takaro CryImporter for 3ds Max",
     "version": (1, 4, 14),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > CryEngine",
-    "description": "Import/Export CryEngine 1 / Far Cry geometry and animation files",
+    "description": "Import/Export CryEngine 1 / Far Cry asset, geometry, skeleton, and animation files",
     "category": "Import-Export",
 }
 
@@ -13,12 +13,12 @@ import os
 from bpy.props import StringProperty, BoolProperty, EnumProperty
 from bpy.types import AddonPreferences, Panel, PropertyGroup
 from bpy_extras.io_utils import ImportHelper, ExportHelper
-from . import cgf_reader
-from . import cgf_builder
-from . import cgf_exporter
+from . import cry_chunk_reader
+from . import cry_asset_builder
+from . import cry_exporter
 
 
-ADDON_BUILD_TAG = "v193-clean-plus-root"
+ADDON_BUILD_TAG = "v227-asset-module-rename"
 
 
 # ── CryEngine Material Properties ─────────────────────────────────────────────
@@ -275,7 +275,7 @@ class ImportCGF(bpy.types.Operator, ImportHelper):
     def execute(self, context):
         # Use per-import override if set, otherwise fall back to global prefs
         game_root = self.game_root_override.strip() or get_game_root_path()
-        result = cgf_builder.load(
+        result = cry_asset_builder.load(
             self, context,
             filepath         = self.filepath,
             import_materials = self.import_materials,
@@ -326,7 +326,7 @@ def _store_ctrl_ids(arm_obj):
     if not source_path:
         return
     try:
-        reader = cgf_reader.ChunkReader()
+        reader = cry_chunk_reader.ChunkReader()
         archive = reader.read_file(source_path)
         if archive.bone_anim_chunks:
             name_list = archive.bone_name_list_chunks[0].name_list \
@@ -360,7 +360,7 @@ class ImportCAF(bpy.types.Operator, ImportHelper):
     )
 
     def execute(self, context):
-        return cgf_builder.load_caf(
+        return cry_asset_builder.load_caf(
             self, context, self.filepath, self.append, self.debug_caf
         )
 
@@ -388,7 +388,7 @@ class ImportANM(bpy.types.Operator, ImportHelper):
 
     def execute(self, context):
         # CE1 ANM is treated here as the same animation container class as CAF.
-        return cgf_builder.load_caf(
+        return cry_asset_builder.load_caf(
             self, context, self.filepath, self.append, self.debug_caf
         )
 
@@ -414,7 +414,7 @@ class ImportCAL(bpy.types.Operator, ImportHelper):
     )
 
     def execute(self, context):
-        return cgf_builder.load_cal(self, context, self.filepath, self.debug_caf)
+        return cry_asset_builder.load_cal(self, context, self.filepath, self.debug_caf)
 
     def draw(self, context):
         self.layout.prop(self, "debug_caf")
@@ -441,7 +441,7 @@ class ExportCGF(bpy.types.Operator, ExportHelper):
         description="Export only selected mesh objects", default=False)
 
     def execute(self, context):
-        return cgf_exporter.export_cgf_scene(
+        return cry_exporter.export_cgf_scene(
             self, context, self.filepath,
             export_materials = self.export_materials,
             export_skeleton  = self.export_skeleton,
@@ -480,7 +480,7 @@ class ExportCGA(bpy.types.Operator, ExportHelper):
         description="Export only selected mesh objects", default=False)
 
     def execute(self, context):
-        return cgf_exporter.export_cgf_scene(
+        return cry_exporter.export_cgf_scene(
             self, context, self.filepath,
             export_materials = self.export_materials,
             export_skeleton  = self.export_skeleton,
@@ -519,7 +519,7 @@ class ExportBLD(bpy.types.Operator, ExportHelper):
         description="Export only selected mesh objects", default=False)
 
     def execute(self, context):
-        return cgf_exporter.export_cgf_scene(
+        return cry_exporter.export_cgf_scene(
             self, context, self.filepath,
             export_materials = self.export_materials,
             export_skeleton  = self.export_skeleton,
@@ -582,7 +582,7 @@ class ExportCryAuto(bpy.types.Operator, ExportHelper):
             except Exception:
                 pass
 
-        result = cgf_exporter.export_cgf_scene(
+        result = cry_exporter.export_cgf_scene(
             self, context, geom_path,
             export_materials=self.export_materials,
             export_skeleton=bool(arm_obj),
@@ -596,7 +596,7 @@ class ExportCryAuto(bpy.types.Operator, ExportHelper):
 
         if self.export_animation_set and arm_obj and actions:
             cal_path = os.path.join(base_dir, base_name + ".cal")
-            result = cgf_exporter.export_cal(self, context, cal_path)
+            result = cry_exporter.export_cal(self, context, cal_path)
             if result == {'FINISHED'}:
                 exported.append(os.path.basename(cal_path))
 
@@ -642,7 +642,7 @@ class ExportCAF(bpy.types.Operator, ExportHelper):
     )
 
     def execute(self, context):
-        return cgf_exporter.export_caf(self, context, self.filepath, debug_export=self.debug_export)
+        return cry_exporter.export_caf(self, context, self.filepath, debug_export=self.debug_export)
 
 
 class ExportANM(bpy.types.Operator, ExportHelper):
@@ -661,7 +661,7 @@ class ExportANM(bpy.types.Operator, ExportHelper):
 
     def execute(self, context):
         # Current backend writes the generic CE1 animation container used by CAF/ANM.
-        return cgf_exporter.export_caf(self, context, self.filepath, debug_export=self.debug_export)
+        return cry_exporter.export_caf(self, context, self.filepath, debug_export=self.debug_export)
 
 
 # ── CAL exporter ──────────────────────────────────────────────────────────────
@@ -676,7 +676,7 @@ class ExportCAL(bpy.types.Operator, ExportHelper):
     filter_glob: StringProperty(default="*.cal", options={'HIDDEN'})
 
     def execute(self, context):
-        return cgf_exporter.export_cal(self, context, self.filepath)
+        return cry_exporter.export_cal(self, context, self.filepath)
 
 
 # ── Menu entries ──────────────────────────────────────────────────────────────
