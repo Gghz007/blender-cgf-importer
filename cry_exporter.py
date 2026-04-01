@@ -8,7 +8,7 @@ import math
 import mathutils
 import struct
 
-from .cgf_writer import (
+from .cry_chunk_writer import (
     CGFWriter,
     ctrl_id_from_name,
     build_source_info_chunk,
@@ -27,7 +27,7 @@ from .cgf_writer import (
     CHUNK_TYPE_SOURCE_INFO, CHUNK_TYPE_CONTROLLER,
 )
 
-from .cgf_reader import (
+from .cry_chunk_reader import (
     ChunkReader,
     CHUNK_TYPE_MESH       as CT_MESH,
     CHUNK_TYPE_NODE       as CT_NODE,
