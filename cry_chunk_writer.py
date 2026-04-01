@@ -9,7 +9,7 @@ import os
 import zlib
 import math
 
-from .cgf_reader import (
+from .cry_chunk_reader import (
     FILE_SIGNATURE,
     FILE_TYPE_GEOM_HIGH, FILE_TYPE_GEOM_LOW,
     FILE_TYPE_ANIM_HIGH, FILE_TYPE_ANIM_LOW,
