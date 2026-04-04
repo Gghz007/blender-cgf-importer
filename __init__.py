@@ -275,6 +275,7 @@ class ImportCGF(bpy.types.Operator, ImportHelper):
     def execute(self, context):
         # Use per-import override if set, otherwise fall back to global prefs
         game_root = self.game_root_override.strip() or get_game_root_path()
+        full_scene_setup = _get_pref_bool("enable_scene_setup", True)
         result = cry_asset_builder.load(
             self, context,
             filepath         = self.filepath,
@@ -285,13 +286,13 @@ class ImportCGF(bpy.types.Operator, ImportHelper):
             import_weights   = self.import_weights,
             game_root_path   = game_root,
             skip_collision_geometry = get_skip_collision_geometry(),
-            create_asset_root_empty = _get_pref_bool("enable_scene_setup", True),
-            apply_armature_node_transform = _get_pref_bool("enable_scene_setup", True),
-            apply_mesh_node_transform = _get_pref_bool("enable_scene_setup", True),
-            preserve_mesh_world_on_armature_parent = _get_pref_bool("enable_scene_setup", True),
-            create_helper_nodes = _get_pref_bool("enable_scene_setup", True),
-            create_controller_targets = _get_pref_bool("enable_scene_setup", True),
-            create_producer_cameras = _get_pref_bool("enable_scene_setup", True),
+            create_asset_root_empty = full_scene_setup,
+            apply_armature_node_transform = True,
+            apply_mesh_node_transform = True,
+            preserve_mesh_world_on_armature_parent = True,
+            create_helper_nodes = full_scene_setup,
+            create_controller_targets = full_scene_setup,
+            create_producer_cameras = full_scene_setup,
         )
         if result == {'FINISHED'}:
             for obj in context.scene.objects:
