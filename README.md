@@ -396,6 +396,11 @@ The addon stores extra CryEngine metadata on imported data where possible:
 
 This improves export fidelity when you import a CryEngine asset, edit it, and export it again.
 
+Material export note:
+
+- the exporter writes standard material chunk names using full Cry format `material_name(ShaderName)/surface_name`
+- this preserves shader/surface identity on round-trip and prevents accidental fallback to invisible/NoDraw-like behavior in editor
+
 ## Known Limitations
 
 - some legacy controller types are still uncommon and may not be fully covered in every asset
